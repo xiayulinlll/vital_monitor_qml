@@ -55,8 +55,8 @@ void messageHandler(QtMsgType type, const QMessageLogContext &ctx,
  *  - 由 `QApplication` 改为 `QGuiApplication`：QML 场景图不需要 QtWidgets，
  *    少链接一个模块可明显缩短启动时间与包体；
  *  - 不再 `new MainWindow` 作为顶层窗口，改为加载 `qml/Main.qml`；
- *  - 但**绘图内核仍然是 QPainter**（`ChartBridge` 继承 `QQuickPaintedItem`），
- *    这是刻意的取舍：QML 只替换外壳，热路径绘制算法完全复用。
+ *  - 绘图内核仍由 QPainter 承担（`ChartBridge` 继承 `QQuickPaintedItem`）：
+ *    QML 只替换外壳，热路径绘制算法完全复用。
  *
  * 启动顺序有严格要求：
  *   1. 创建业务宿主 `MainWindowQml`（构造时按默认剖面建好模型）；

@@ -8,9 +8,9 @@ import QtQuick.Layouts
 //       组件由同目录隐式解析（qmldir 的 prefer 前缀生效）。
 //
 // @note 使用 `Window` 而不是 `ApplicationWindow`：后者属于
-//       QtQuick.Controls，本项目全部控件自绘、不引入 Controls
-//       （保持「纯 QtQuick + QPainter」的依赖面）。`Window` 在
-//       QtQuick.Window 中，是 QtQuick 自带的顶层窗口类型。
+//       QtQuick.Controls，本项目不引入 Controls，控件均在 qml/ 下
+//       基于 QtQuick 基础类型实现。`Window` 在 QtQuick.Window 中，
+//       是 QtQuick 自带的顶层窗口类型。
 
 /**
  * 应用主视图（对应 Widgets 版 MainWindow::setupUi 的布局）。

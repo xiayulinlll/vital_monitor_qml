@@ -3,9 +3,9 @@ import QtQuick
 /**
  * 深色工具条按钮（本项目的统一按钮外观）。
  *
- * @note 刻意不用 QtQuick.Controls 的 Button：本项目全部控件自绘，
- *       避免额外依赖 Controls 模块与样式插件，也避免其
- *       「默认样式在各平台差异极大」的问题影响医疗界面的一致性。
+ * @note 刻意不用 QtQuick.Controls 的 Button：本项目不引入 Controls，
+ *       按钮基于 QtQuick 基础类型实现，避免额外依赖 Controls 模块与样式插件，
+ *       也避免其「默认样式在各平台差异极大」的问题影响医疗界面的一致性。
  */
 Rectangle {
     id: btn

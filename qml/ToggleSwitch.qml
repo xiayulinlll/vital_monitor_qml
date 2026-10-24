@@ -8,7 +8,7 @@ import QtQuick
  * 是无需阅读文字的直觉语义。
  *
  * @note 与 `ToolButton` 一样不使用 QtQuick.Controls：
- *       本项目全部控件自绘，避免样式插件依赖与跨平台外观差异。
+ *       控件基于 QtQuick 基础类型实现，避免样式插件依赖与跨平台外观差异。
  */
 Rectangle {
     id: sw

@@ -1,8 +1,6 @@
 # vital_monitor —— 多通道生理信号趋势监测上位机
 
-> 医疗监护趋势图上位机模块。技术栈：C++17 + Qt6 Widgets + QPainter 绘制 + 多线程 + 环形缓冲区。
-
-对标场景：医疗设备上位机开发、Qt 桌面开发、嵌入式医疗软件。
+> 医疗监护趋势图上位机模块。技术栈：C++17 + Qt6 Quick（QML）+ QPainter + 多线程 + 环形缓冲区。
 
 ---
 
@@ -12,7 +10,7 @@
 上绘制长时间趋势曲线，展示数小时内指标变化。如果直接在 UI 线程绘制大量历史采样点，
 会造成界面卡顿、刷新延迟。
 
-本项目基于 Qt Widget + QPainter 开发一套多通道生理趋势监测上位机：
+本项目基于 Qt6 Quick + QPainter 实现一套多通道生理趋势监测上位机：
 
 - 多路体征趋势曲线同时绘制，不同指标独立颜色与量程；
 - 实时数值面板，越限文字高亮；
@@ -28,34 +26,36 @@
 ## 二、目录结构
 
 ```
-vital_monitor/
-├── CMakeLists.txt              # CMake 工程（Qt6 Core/Gui/Widgets）
+vital_monitor_qml/
+├── CMakeLists.txt              # CMake 工程（Qt6 Core/Gui/Qml/Quick/Multimedia）
 ├── CMakePresets.json           # VS Code / 命令行构建预设（MinGW Debug/Release）
 ├── .vscode/                    # VS Code 配置：构建任务、调试、IntelliSense
-│   ├── settings.json
-│   ├── tasks.json
-│   ├── launch.json
-│   └── extensions.json
+├── qml/                        # ④ QML 界面层（控件基于 QtQuick 基础类型实现）
+│   ├── Main.qml / Theme.qml / Backend.qml
+│   ├── PatientBar.qml / ChartPanel.qml / ChartBridge.qml
+│   ├── ChannelValueCard.qml / ChannelConfigPanel.qml
+│   └── AlarmBanner.qml / AlarmListPanel.qml / LogPanel.qml …
 └── src/
     ├── main.cpp
     ├── data/                   # ① 数据模拟采集层（后台子线程）
     │   ├── SampleData.h            #   采样帧 / 通道采样 / 告警事件数据结构
-    │   ├── VitalSignSimulator.h
-    │   └── VitalSignSimulator.cpp  #   生理信号模拟器（QThread 内运行）
-    ├── core/                   # ② 业务与数据管理层（主线程）
+    │   └── VitalSignSimulator.h/.cpp   #   生理信号模拟器（QThread 内运行）
+    ├── core/                   # ② 业务与数据层（主线程）
     │   ├── RingBuffer.h            #   线程安全定长环形缓冲区（模板）
     │   ├── ChannelConfig.h/.cpp    #   通道配置管理器（名称/颜色/量程/阈值/患者类型/报警优先级）
     │   ├── AlarmDetector.h/.cpp    #   告警判断模块（报警状态机 + 毫秒制延时 + SQI 门控 + 技术报警）
+    │   ├── AlarmNotifier.h/.cpp    #   分级提示音 / 静音 / 暂停（单一计时真源）
     │   ├── CoordinateMapper.h/.cpp #   坐标变换计算器（数值→画布像素）
     │   ├── HistoryRecorder.h/.cpp  #   历史数据文件读写（回放/存档）
     │   └── AuditLogger.h/.cpp      #   审计追踪（配置变更 / 告警事件落盘 + CRC32 校验）
-    ├── chart/                  # ③ QPainter 绘图控件层（主线程绘图）
-    │   └── TrendChartWidget.h/.cpp #   自定义多通道趋势绘图控件
-    └── ui/                     # ④ 主 UI 面板层
-        ├── MainWindow.h/.cpp       #   主窗口，装配四层 + 线程管理
-        ├── VitalValuePanel.h/.cpp  #   实时数值面板（越限高亮 + SQI 指示）
-        ├── AlarmBanner.h/.cpp      #   报警横幅（声光报警 + 确认 / 静音）
-        └── ChannelConfigPanel.h/.cpp # 参数配置面板（量程/阈值/颜色/患者类型）
+    ├── chart/                  # ③ QPainter 绘图内核层（主线程绘图）
+    │   └── ChartBridge.h/.cpp      #   多通道趋势绘图内核（QQuickPaintedItem）
+    ├── models/                 # ④ QML 数据模型层
+    │   ├── ChannelModel.h/.cpp     #   通道数值（越限高亮 + SQI 指示）
+    │   ├── AlarmModel.h/.cpp       #   活动告警列表（多优先级排序）
+    │   └── LogModel.h/.cpp         #   状态 / 告警日志
+    └── app/                    # ⑤ 业务宿主层（不含 UI 代码）
+        └── MainWindowQml.h/.cpp    #   线程装配 + 帧分发 + 动作转发 + 审计落盘
 
 tests/
 └── alarm_state_test.cpp        # AlarmDetector 状态机自动化测试（13 个用例）
@@ -79,10 +79,10 @@ docs/
 | 一 · 4 | **报警延时以毫秒计**：`alarmDelayMs` 取代帧数，采样率变化行为一致 | `ChannelConfig`、`AlarmDetector::detect` |
 | 二 · 5 | **报警状态机**：`Active → Acknowledged / Cleared / Escalated / LatchedSilent`，超时未确认自动**升级** | `AlarmEvent::State`、`AlarmDetector` |
 | 二 · 6 | **患者类型预设**（成人 / 小儿 / 新生儿）+ 报警限剖面，二级危险阈值随基线平移 | `ChannelConfigManager::loadProfile` |
-| 二 · 7 | **信号质量（SQI）与伪迹抑制**：低 SQI 抑制生理报警、曲线灰色虚线、数值显示 `--` | `VitalSignSimulator`、`AlarmDetector`、`TrendChartWidget`、`VitalValuePanel` |
+| 二 · 7 | **信号质量（SQI）与伪迹抑制**：低 SQI 抑制生理报警、曲线灰色虚线、数值显示 `--` | `VitalSignSimulator`、`AlarmDetector`、`ChartBridge`、`ChannelModel` |
 | 二 · 8 | **数据完整性**：丢帧累计检测、单调采样序号、时间戳规范 | `SampleData`、`AlarmDetector`、`VitalSignSimulator` |
 | 二 · 9 | **技术报警通道**：传感器异常 / 导联脱落 / 信号不足 / 数据不连续，与生理报警分离 | `AlarmEvent::Category`、`AlarmDetector` |
-| 二 · 10 | **每通道独立 Y 轴刻度**：左右分列、按通道配色、轴顶标注通道缩写 | `TrendChartWidget::drawChannelScales` |
+| 二 · 10 | **每通道独立 Y 轴刻度**：左右分列、按通道配色、轴顶标注通道缩写 | `ChartBridge::drawChannelScales` |
 | 二 · 6 | **报警声光指示**：分级提示音（危急 3 连响 / 900 ms）+ 横幅闪烁 + 状态栏常驻报警状态 | `AlarmNotifier`、`AlarmBanner.qml`、`Main.qml`（v1.2.0 新增） |
 | 二 · 7 | **静音 / 暂停 / 确认**：静音只关声音；暂停声光全停但有倒计时、到期自动恢复并立即重报（危急 ≤ 30 s） | `AlarmNotifier`、`Backend.qml`、`AlarmBanner.qml`（v1.2.0 新增） |
 | 二 · 1 | **报警优先级语义**：`AlarmPriority`（高/中/低）+ 二级阈值，**去掉「超出半个量程 = 严重」的临床无意义折算** | `AlarmPriority`、`AlarmDetector::levelForPriority` |
@@ -121,22 +121,27 @@ docs/
 
 ---
 
-## 三、四层架构
+## 三、分层架构
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  ④ 主 UI 面板层 (Qt Widget)                                   │
-│     MainWindow / VitalValuePanel / ChannelConfigPanel        │
+│  ⑤ 业务宿主层（main thread）                                  │
+│     MainWindowQml：线程装配、帧分发、动作转发、审计落盘         │
 ├──────────────────────────────────────────────────────────────┤
-│  ③ QPainter 绘图控件层 (自定义 QWidget，主线程绘图)             │
-│     TrendChartWidget：曲线 / 网格 / 告警标记 / 缩放平移        │
+│  ④ QML 界面层（qml/，独立控件自实现）                          │
+│     Main / PatientBar / ChartPanel / ChannelValueCard /       │
+│     AlarmBanner / AlarmListPanel / LogPanel / ChannelConfig…  │
 ├──────────────────────────────────────────────────────────────┤
-│  ② 业务与数据管理层 (主线程)                                   │
-│     RingBuffer / ChannelConfigManager / AlarmDetector /      │
-│     CoordinateMapper / HistoryRecorder                       │
+│  ③ QML 数据模型层（main thread）                               │
+│     ChannelModel / AlarmModel / LogModel                     │
 ├──────────────────────────────────────────────────────────────┤
-│  ① 数据模拟采集层 (后台子线程)                                 │
-│     VitalSignSimulator：周期生成多通道模拟体征数据             │
+│  ② 绘图内核层（ChartBridge : QQuickPaintedItem，主线程绘图）    │
+│     曲线 / 网格 / 每通道刻度 / 告警标记 / 缩放平移              │
+├──────────────────────────────────────────────────────────────┤
+│  ① 业务与数据层（main thread）+ 采集模拟（worker thread）       │
+│     RingBuffer / CoordinateMapper / AlarmDetector /           │
+│     AlarmNotifier / HistoryRecorder / AuditLogger /           │
+│     VitalSignSimulator                                        │
 └──────────────────────────────────────────────────────────────┘
         ↑ Qt 信号槽 QueuedConnection（跨线程，自动排队）
 ```
@@ -154,14 +159,14 @@ docs/
 后台线程生成模拟体征采样数据
    → 发信号 frameReady(SampleFrame)（QueuedConnection 跨线程）
    → 主线程槽 onFrameReady()：写入环形缓冲区 + 告警判断
-   → 批量提交绘图控件 appendFrames()
+   → 批量提交绘图内核 appendFrames()
    → 触发局部重绘，QPainter 绘制新增曲线段与告警标记
 ```
 
 ### 流程 2：曲线缩放平移交互
 
 ```
-鼠标滚轮 / 拖拽 → TrendChartWidget 更新视口（采样序号范围）
+鼠标滚轮 / 拖拽 → ChartBridge 更新视口（采样序号范围）
    → 业务层坐标映射器重新计算 → 触发重绘，更新曲线显示
 ```
 
@@ -179,8 +184,8 @@ docs/
 
 | # | 难点 | 工程解决方案 |
 |---|------|-------------|
-| 1 | 大量采样点绘制，paintEvent 全量重绘 CPU 高 | **静态网格背景预渲染到 QPixmap 缓存**，paintEvent 直接 `drawPixmap` 贴图；实时模式下对绘图区做**局部重绘**（`update(rect)`），只刷新新增数据区域；主线程侧**批量提交**（每 2 帧合并一次）进一步降低重绘频率 |
-| 2 | 持续采集数据，内存不断增长 | `RingBuffer<T>` **固定容量环形缓冲**，超容量自动淘汰最旧数据，内存占用上限恒定，适合 7×24 小时运行；日志视图同样限制最大块数 |
+| 1 | 大量采样点绘制，整帧重绘 CPU 高 | **静态网格背景预渲染到 `QImage` 缓存**，`paint()` 直接贴图；实时模式下对绘图区做**局部重绘**（`update(rect)`），只刷新新增数据区域；主线程侧**批量提交**（每 2 帧合并一次）进一步降低重绘频率 |
+| 2 | 持续采集数据，内存不断增长 | `RingBuffer<T>` **固定容量环形缓冲**，超容量自动淘汰最旧数据，内存占用上限恒定，适合 7×24 小时运行；日志模型同样限制最大行数 |
 | 3 | 跨线程传递采样数据出现竞态崩溃 | 采集对象 `moveToThread()` 到工作线程，只生产数据；与主线程仅通过 **QueuedConnection 信号槽**通信；自定义类型通过 `qRegisterMetaType` 注册；环形缓冲使用 **QReadWriteLock** 读写保护（读可并发） |
 | 4 | 多通道量程不同，坐标映射容易出错 | 每个通道在 `CoordinateMapper` 中**独立维护 Y 轴量程**，X 轴共享时间视口；绘图层只负责画点和线，**不参与业务计算** |
 | 5 | 曲线缩放平移交互卡顿 | 交互时**只修改视口参数**（序号范围 / 跨度），不修改底层原始数据；拖拽过程中减少全量刷新，**鼠标释放后再做一次完整刷新** |
@@ -189,13 +194,13 @@ docs/
 
 ## 六、功能清单
 
-1. 自定义 QWidget 绘图控件，基于 QPainter 实现多通道生命体征趋势曲线绘制
+1. 基于 QPainter 的趋势曲线绘制（`QQuickPaintedItem`），多通道生命体征同屏显示
 2. 后台子线程模拟生理数据采集，线程安全环形缓存管理历史采样点，内存恒定
 3. 支持多通道曲线独立配置颜色、量程、告警阈值，越限自动标记告警事件
 4. 支持曲线横向时间缩放、纵向量程切换，鼠标拖拽平移查看历史趋势
-5. 实时体征数值面板，指标越限高亮提示
+5. 实时体征数值列表（`ChannelModel`），指标越限高亮提示
 6. 支持历史数据文件导入回放，趋势画布截图导出保存
-7. QPainter 绘制优化：背景 Pixmap 缓存、局部区域重绘，降低 CPU 占用
+7. 绘制优化：背景图像缓存、局部区域重绘，降低 CPU 占用
 8. 长时间稳定运行，适合医疗监护类上位机软件场景
 
 
