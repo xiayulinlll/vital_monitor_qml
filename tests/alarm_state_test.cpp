@@ -3,6 +3,15 @@
 // 由 CMake 目标 alarm_state_test 构建（对应优化文档第三梯队第 15 项：
 // 自动化测试与 V&V）；不依赖 GUI，退出码 = 失败用例数（0 表示全部通过）。
 //
+// 用例覆盖：
+//   1  持续越限反复上报            2  确认后按 repeatMs 重报
+//   3  超时未确认 → 升级            4  毫秒级去抖
+//   5  条件恢复 → 解除              6  SQI 门控
+//   7  丢帧 → 技术报警              8  优先级语义（非量程折算）
+//   9  伪迹门控                    10 单调时钟时间基准
+//  11  确认与检测共用同一时基        12 技术报警持续时长可查（trackKey）
+//  13  条件键格式统一（类别/通道/方向） 14 单位与量纲校验
+//
 // 运行：
 //   cmake --build --preset mingw-debug --target alarm_state_test
 //   build\vscode-mingw-debug\alarm_state_test.exe
@@ -26,6 +35,15 @@ SampleFrame makeFrame(quint64 idx, qint64 tsMs, int ch, double v,
     s.value = v;
     s.quality = quality;
     f.channels.append(s);
+    return f;
+}
+
+/// 与 makeFrame 相同，但显式设置单调时钟（告警计时以此为准）。
+SampleFrame makeFrameMono(quint64 idx, qint64 monoMs, int ch, double v,
+                          double quality = 1.0)
+{
+    SampleFrame f = makeFrame(idx, /*tsMs=*/1700000000000LL + monoMs, ch, v, quality);
+    f.monotonicMs = monoMs;
     return f;
 }
 
@@ -273,6 +291,249 @@ static void case8_prioritySemantics()
     }
 }
 
+static void case9_artifactGating()
+{
+    qInfo().noquote() << "== 用例 9：伪迹样本不产生生理报警（避免运动伪迹被当成危重）==";
+    const QVector<ChannelConfig> cfgs = testCfgs();
+
+    AlarmDetector d;
+    d.setDefaultSampleIntervalMs(100);
+    qint64 t = 1000;
+    int physio = 0;
+    for (int i = 0; i < 40; ++i) {
+        SampleFrame f = makeFrame(i, t, 0, 180.0);
+        f.channels[0].artifact = true;
+        for (const AlarmEvent &e : d.detect(f, cfgs))
+            if (e.category == AlarmEvent::Physiological)
+                ++physio;
+        t += 100;
+    }
+    check(physio == 0, "伪迹样本不产生生理报警");
+    check(d.activeCount() == 0, "伪迹期间无活动生理告警");
+
+    // 伪迹解除后，同样的越限值必须恢复报警能力 ——
+    // 否则「压住了伪迹」会变成「压住了真实病情」。
+    int reported = 0;
+    for (int i = 40; i < 80; ++i) {
+        for (const AlarmEvent &e : d.detect(makeFrame(i, t, 0, 180.0), cfgs))
+            if (e.category == AlarmEvent::Physiological)
+                ++reported;
+        t += 100;
+    }
+    check(reported > 0, "伪迹解除后恢复生理报警");
+}
+
+static void case10_monotonicTimebase()
+{
+    qInfo().noquote() << "== 用例 10：告警计时使用单调时钟（不受系统校时影响）==";
+    const QVector<ChannelConfig> cfgs = testCfgs();
+
+    // 墙钟在运行中回拨 1 小时，但单调时钟正常前进。
+    // 期望：去抖仍然按 1 秒生效，重复提示仍然按 2 秒触发。
+    AlarmDetector d;
+    d.setDefaultSampleIntervalMs(100);
+
+    int reports = 0;
+    for (int i = 0; i < 60; ++i) {           // 单调时间 100..6000 ms
+        SampleFrame f = makeFrameMono(i, 100 + i * 100, 0, 150.0);
+        // 第 30 帧起把墙钟往回拨 1 小时（模拟 NTP 校时）。
+        if (i >= 30)
+            f.timestampMs -= 3600LL * 1000LL;
+        for (const AlarmEvent &e : d.detect(f, cfgs))
+            if (e.category == AlarmEvent::Physiological && e.channelId == 0)
+                ++reports;
+    }
+    check(reports > 0, "墙钟回拨后仍按单调时钟正常触发报警");
+    check(d.activeCount() == 1, "活动告警数为 1");
+
+    // 持续时长应基于单调时钟（≈ 4.x s），而不是负值或 1 小时。
+    const QHash<QString, qint64> dur = d.activeDurationsMs();
+    check(!dur.isEmpty(), "activeDurationsMs() 返回持续时长");
+    for (auto it = dur.constBegin(); it != dur.constEnd(); ++it) {
+        check(it.value() > 0 && it.value() <= 6000,
+              QStringLiteral("持续时长合理（%1 ms，未受墙钟回拨影响）").arg(it.value()));
+    }
+}
+
+
+static void case11_ackTimebase()
+{
+    qInfo().noquote() << "== 用例 11：确认时刻使用与 detect() 相同的时基 ==";
+    const QVector<ChannelConfig> cfgs = testCfgs();
+
+    AlarmDetector d;
+    d.setDefaultSampleIntervalMs(100);
+    // 用单调时钟推进到 5 秒（墙钟是 2023 年的大数）。
+    for (int i = 0; i < 50; ++i)
+        d.detect(makeFrameMono(i, 100 + i * 100, 0, 150.0), cfgs);
+
+    // 不传时间：acknowledge() 必须回退到内部记录的单调时基，
+    // 而不是 QDateTime::currentMSecsSinceEpoch()（否则两者相差数十年，
+    // 重复提示 / 升级计时会全部失效）。
+    const auto acked = d.acknowledge(QString());
+    check(acked.size() == 1, "无参确认成功");
+
+    int reReports = 0;
+    for (int i = 50; i < 100; ++i) {         // 再推进 5 秒
+        for (const AlarmEvent &e : d.detect(makeFrameMono(i, 100 + i * 100, 0, 150.0), cfgs))
+            if (e.state == AlarmEvent::LatchedSilent || e.state == AlarmEvent::Active)
+                ++reReports;
+    }
+    check(reReports > 0, "确认后条件持续 → 按 repeatMs 重新提示（时基一致）");
+}
+
+static void case12_technicalAlarmDuration()
+{
+    qInfo().noquote() << "== 用例 12：技术报警的持续时长必须可查（trackKey 与 conditionKey 不同）==";
+    const QVector<ChannelConfig> cfgs = testCfgs();
+
+    // 低 SQI → 技术报警。技术报警在 m_tracks 中的键是 "1/<ch>/SQI"，
+    // 而 AlarmEvent::conditionKey() 生成的是 "1/<ch>/HI"（类别/通道/方向）。
+    // 若下游用 conditionKey() 回查 activeDurationsMs()，永远查不到，
+    // 报警列表显示「—」、审计日志出现「持续时间=?s」。
+    AlarmDetector d;
+    d.setDefaultSampleIntervalMs(100);
+    QVector<AlarmEvent> techEvents;
+    qint64 t = 1000;
+    for (int i = 0; i < 30; ++i) {
+        for (const AlarmEvent &e : d.detect(makeFrame(i, t, 0, 80.0, /*quality=*/0.10), cfgs))
+            if (e.category == AlarmEvent::Technical)
+                techEvents.append(e);
+        t += 100;
+    }
+    check(!techEvents.isEmpty(), "低 SQI 产生技术报警");
+
+    const QHash<QString, qint64> durations = d.activeDurationsMs();
+    bool allFound = true;
+    for (const AlarmEvent &e : techEvents) {
+        if (e.trackKey.isEmpty() || !durations.contains(e.trackKey))
+            allFound = false;
+    }
+    check(allFound, "每条技术报警事件的 trackKey 都能在持续时长表中命中");
+
+    // 反向断言：证明旧实现（用 conditionKey）确实是错的，
+    // 避免有人「顺手」把调用方改回去。
+    bool anyConditionKeyHit = false;
+    for (const AlarmEvent &e : techEvents)
+        if (durations.contains(e.conditionKey()))
+            anyConditionKeyHit = true;
+    check(!anyConditionKeyHit,
+          "conditionKey() 不命中技术报警（这正是不能用它回查的原因）");
+
+    // 技术报警确认时同样能拿到时长（审计日志写入用）。
+    const auto acked = d.acknowledge(QString(), t);
+    bool ackAllFound = true;
+    for (const AlarmEvent &e : acked)
+        if (e.trackKey.isEmpty() || !durations.contains(e.trackKey))
+            ackAllFound = false;
+    check(ackAllFound, "确认后仍能用 trackKey 回查持续时长（审计不再出现 ?s）");
+
+    // 幂等性：紧接着再确认一次，不应再产生任何「新确认」记录，
+    // 否则医护连点按钮会把审计日志淹没在重复条目里。
+    const auto again = d.acknowledge(QString(), t);
+    check(again.isEmpty(), "重复确认不产生重复事件（幂等，审计不被淹没）");
+}
+
+static void case13_conditionKeyFormat()
+{
+    qInfo().noquote() << "== 用例 13：条件键格式统一为「类别/通道/方向」（与 conditionKey() 一致）==";
+    const QVector<ChannelConfig> cfgs = testCfgs();
+
+    AlarmDetector d;
+    d.setDefaultSampleIntervalMs(100);
+    QVector<AlarmEvent> phys;
+    qint64 t = 1000;
+    for (int i = 0; i < 40; ++i) {
+        for (const AlarmEvent &e : d.detect(makeFrame(i, t, 2, 200.0), cfgs))
+            if (e.category == AlarmEvent::Physiological)
+                phys.append(e);
+        t += 100;
+    }
+    check(!phys.isEmpty(), "通道 2 越限产生生理报警");
+
+    bool allMatch = true;
+    for (const AlarmEvent &e : phys) {
+        // 检测器内部键必须与对外暴露的 conditionKey() 逐字相同。
+        if (e.trackKey != e.conditionKey())
+            allMatch = false;
+    }
+    check(allMatch, "trackKey 与 conditionKey() 完全一致（无两套键空间）");
+    if (!phys.isEmpty()) {
+        // 「类别/通道/方向」：生理=0、通道=2 → 形如 "0/2/HI"。
+        // 若写成「通道/类别」会得到 "2/0/HI"，本断言即失败。
+        check(phys.first().conditionKey() == QStringLiteral("0/2/HI"),
+              QStringLiteral("键为 \"0/2/HI\"（实际 \"%1\"）").arg(phys.first().conditionKey()));
+    }
+}
+
+static void case14_unitDimensionValidation()
+{
+    qInfo().noquote() << "== 用例 14：单位与量纲校验（9.1 第 3 项）==";
+
+    // 1) 默认配置必须全部通过校验：这条断言的价值在于「反向保护」——
+    //    若有人把 kUnitRanges 的单位写成 Latin-1 字面量，`℃` 会被截断，
+    //    体温通道会立刻在这里变成 Unknown 并被抓住。
+    ChannelConfigManager mgr;
+    for (const ChannelConfig &c : mgr.channels()) {
+        check(c.validateUnit() == UnitIssue::Ok,
+              QStringLiteral("%1（%2）默认配置单位自洽（实际：%3）")
+                  .arg(c.name, c.unit, unitIssueName(c.validateUnit())));
+    }
+
+    // 2) 体温 + bpm：名称暗示温度，单位是心率 → Mismatch。
+    {
+        ChannelConfig c;
+        c.name = QStringLiteral("体温 Temp");
+        c.unit = QStringLiteral("bpm");
+        c.minValue = 34.0;
+        c.maxValue = 42.0;
+        check(c.validateUnit() == UnitIssue::Mismatch, "体温 + bpm → Mismatch");
+    }
+
+    // 3) SpO2 量程 0~1000 %：单位合法但物理上不可能 → NotInRange。
+    {
+        ChannelConfig c;
+        c.name = QStringLiteral("血氧 SpO2");
+        c.unit = QStringLiteral("%");
+        c.minValue = 0.0;
+        c.maxValue = 1000.0;
+        check(c.validateUnit() == UnitIssue::NotInRange, "SpO2 量程 0~1000% → NotInRange");
+    }
+
+    // 4) 未登记单位：无法校验，但不得误判为「不合法」。
+    {
+        ChannelConfig c;
+        c.name = QStringLiteral("自定义通道");
+        c.unit = QStringLiteral("furlong");
+        c.minValue = 0.0;
+        c.maxValue = 10.0;
+        check(c.validateUnit() == UnitIssue::Unknown, "未登记单位 → Unknown");
+    }
+
+    // 5) 摄氏 / 华氏各自的合理量程都应通过（含 Unicode 符号检查）。
+    {
+        ChannelConfig c;
+        c.name = QStringLiteral("体温 Temp");
+        c.unit = QStringLiteral("℃");
+        c.minValue = 34.0;
+        c.maxValue = 42.0;
+        check(c.validateUnit() == UnitIssue::Ok, "体温 + ℃ → Ok（非 ASCII 单位可识别）");
+
+        c.unit = QStringLiteral("℉");
+        c.minValue = 90.0;
+        c.maxValue = 110.0;
+        check(c.validateUnit() == UnitIssue::Ok, "体温 + ℉ → Ok");
+    }
+
+    // 6) 区间外取值判定（供界面提示使用）。
+    check(!isValuePlausibleInUnit(QStringLiteral("bpm"), 1000.0),
+          "bpm 下 1000 不可能");
+    check(isValuePlausibleInUnit(QStringLiteral("bpm"), 120.0),
+          "bpm 下 120 可能");
+    check(isKnownUnit(QStringLiteral("mmHg")) && !isKnownUnit(QStringLiteral("furlong")),
+          "isKnownUnit 能区分已登记 / 未登记单位");
+}
+
 int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
@@ -285,6 +546,12 @@ int main(int argc, char *argv[])
     case6_sqiGating();
     case7_droppedFrames();
     case8_prioritySemantics();
+    case9_artifactGating();
+    case10_monotonicTimebase();
+    case11_ackTimebase();
+    case12_technicalAlarmDuration();
+    case13_conditionKeyFormat();
+    case14_unitDimensionValidation();
 
     qInfo().noquote() << (g_fail == 0
                               ? QStringLiteral("==== 全部通过 ====")

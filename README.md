@@ -1,9 +1,8 @@
 # vital_monitor —— 多通道生理信号趋势监测上位机
 
-> 医疗监护趋势图上位机模块。纯 Qt Widget 实现，**无 OpenGL、无第三方绘图库**，
-> 全部曲线依靠 `QPainter` 绘制。技术栈：C++17 + Qt6 Widgets + 多线程 + 环形缓冲区。
+> 医疗监护趋势图上位机模块。技术栈：C++17 + Qt6 Widgets + QPainter 绘制 + 多线程 + 环形缓冲区。
 
-对标岗位：医疗设备上位机开发、Qt 桌面开发、嵌入式医疗软件。
+对标场景：医疗设备上位机开发、Qt 桌面开发、嵌入式医疗软件。
 
 ---
 
@@ -59,11 +58,11 @@ vital_monitor/
         └── ChannelConfigPanel.h/.cpp # 参数配置面板（量程/阈值/颜色/患者类型）
 
 tests/
-└── alarm_state_test.cpp        # AlarmDetector 状态机自动化测试（8 个用例）
+└── alarm_state_test.cpp        # AlarmDetector 状态机自动化测试（13 个用例）
 
 docs/
 ├── 医疗器材合规优化方向.md      # 合规差距分析（第一/二/三梯队需求来源）
-└── 项目功能与代码文件说明.md    # 逐文件说明 + 功能清单 + 优化审核 + 实习可行性评估
+└── 项目功能与代码文件说明.md    # 逐文件说明 + 功能清单 + 优化审核 + 项目质量评估
 ```
 
 ---
@@ -84,12 +83,41 @@ docs/
 | 二 · 8 | **数据完整性**：丢帧累计检测、单调采样序号、时间戳规范 | `SampleData`、`AlarmDetector`、`VitalSignSimulator` |
 | 二 · 9 | **技术报警通道**：传感器异常 / 导联脱落 / 信号不足 / 数据不连续，与生理报警分离 | `AlarmEvent::Category`、`AlarmDetector` |
 | 二 · 10 | **每通道独立 Y 轴刻度**：左右分列、按通道配色、轴顶标注通道缩写 | `TrendChartWidget::drawChannelScales` |
+| 二 · 6 | **报警声光指示**：分级提示音（危急 3 连响 / 900 ms）+ 横幅闪烁 + 状态栏常驻报警状态 | `AlarmNotifier`、`AlarmBanner.qml`、`Main.qml`（v1.2.0 新增） |
+| 二 · 7 | **静音 / 暂停 / 确认**：静音只关声音；暂停声光全停但有倒计时、到期自动恢复并立即重报（危急 ≤ 30 s） | `AlarmNotifier`、`Backend.qml`、`AlarmBanner.qml`（v1.2.0 新增） |
 | 二 · 1 | **报警优先级语义**：`AlarmPriority`（高/中/低）+ 二级阈值，**去掉「超出半个量程 = 严重」的临床无意义折算** | `AlarmPriority`、`AlarmDetector::levelForPriority` |
-| 六 · 1 | **报警色码对齐 IEC 60601-1-8**：全控件共用 `alarmIndicatorColor()`，高优先级额外加白框强调 | `SampleData.h`、`TrendChartWidget` |
-| 三 · 15 | **自动化测试**：`alarm_state_test` 目标，8 个用例，退出码 = 失败数 | `tests/alarm_state_test.cpp`、`CMakeLists.txt` |
+| 六 · 1 | **报警色码对齐 IEC 60601-1-8**：全控件共用同一色值，高优先级额外强调 | `SampleData.h`、`Theme.qml` |
+| 三 · 15 | **自动化测试**：`alarm_state_test`（14 用例）+ `alarm_pause_test`（10 用例），退出码 = 失败数 | `tests/*.cpp`、`CMakeLists.txt` |
+| 九 · 3 | **单位与量纲校验**：已知单位 / 量纲族 / 物理区间三重校验，配置面板提交前列出问题 | `ChannelConfig::validateUnit`（v1.2.1 新增） |
+| 九 · 4 | **患者信息区**：床号 / 患者ID / 姓名（内联编辑）+ 患者类型，改动写日志与审计 | `qml/PatientBar.qml`、`MainWindowQml::recordPatientInfo`（v1.2.1 新增） |
+| 九 · 5 | **演示模式标识**：常驻高对比橙色色块「⚠ 演示模式 · 模拟数据」 | `qml/PatientBar.qml`（v1.2.1 新增） |
+| 六 · 3 | **配置二次确认**：改量程 / 报警限时列出「旧值 → 新值」，点「确认下发」才生效 | `qml/ChannelConfigPanel.qml::requestApply`（v1.2.1 新增） |
+| 三 · 5 | **越界 / 伪迹角标**：不裁剪数值，以 `↑` / `↓` / `?` 提示 | `ChannelModel`、`qml/ChannelValueCard.qml`（v1.2.1 新增） |
 
-> 第三梯队其余项（软件安全分级、SOUP 清单、需求追溯矩阵、FMEA、SBOM、
-> 可用性工程文件、变更控制流程）属**流程与文档范畴**，不体现在代码中。
+### ⚠️ 告警键 / 计时缺陷修复（v1.1.1，与 Widgets 版同步）
+
+以下三个缺陷**单元测试全绿时依然存在**，只能靠实机运行审计日志发现：
+
+| # | 缺陷 | 现象 | 修复 |
+|---|------|------|------|
+| 1 | 告警持续时长丢失 | 审计日志出现 `持续时间=?s`，报警列表时长列显示「—」 | `Track::key` + `AlarmEvent::trackKey` 作为唯一定位手段，**禁止**用 `conditionKey()` 反查 |
+| 2 | 条件键顺序写反 | 日志出现 `条件=1/0/LO`（通道在前） | `detect()` 的 `baseKey` 统一为 `类别/通道` |
+| 3 | 确认非幂等 | 连点「确认」把审计日志淹没在重复记录里 | `acknowledge()` 跳过已确认的告警 |
+
+> **键是跨模块契约**：条件键形如 `类别/通道/方向`（`0/2/HI`）；
+> 技术报警另有一套键（`1/2/SQI`），只能通过 `AlarmEvent::trackKey` 定位。
+> 「已持续 N 秒」的排序与显示全部走 `trackKey` → `activeDurationsMs()`。
+
+实机验证（`build/vscode-mingw-debug/audit/audit_20261019.log`）：
+条件键全部为 `0/<通道>/HI|LO`、技术报警为 `1/<通道>/SQI`，
+4 条「告警确认」记录均带真实持续时长（2.3–4.1 s），`?s` 计数为 0，
+同通道无重复确认记录。
+
+> 第三梯队其余项已作为**过程文档**移植到本工程 `docs/`：
+> `软件安全分级声明.md`、`SOUP清单.md`、`需求追溯矩阵.md`、`危害分析与FMEA.md`、
+> `SBOM与网络安全.md`、`可用性工程文件.md`、`变更控制流程.md`。
+> 这些文件按 **QML 版的真实代码**重写（不是从 Widgets 版照抄），
+> 并如实标注了 QML 版尚未移植的能力（权限体系、采集看门狗、文件完整性校验）。
 
 ---
 
@@ -147,7 +175,7 @@ docs/
 
 ---
 
-## 五、核心难点与工程解决方案（面试重点）
+## 五、核心难点与工程解决方案
 
 | # | 难点 | 工程解决方案 |
 |---|------|-------------|
@@ -259,14 +287,36 @@ ctest --test-dir build\vscode-mingw-debug
 | **实时跟随** | 开启后视口右端始终对齐最新数据；关闭即进入历史浏览模式 |
 | **鼠标滚轮** | 在绘图区滚动，横向缩放时间轴（只改视口，不动原始数据） |
 | **鼠标左键拖拽** | 平移查看历史趋势，自动切换历史浏览模式，松手后完整刷新 |
-| **清空** | 清空历史缓冲、告警记录与画布 |
-| **导入历史** | 载入 CSV 历史数据并自动按实时节奏回放 |
-| **导出截图** | 把当前趋势画布保存为 PNG / JPG |
+| **清空** | 清空历史缓冲、告警记录与画布（声音与暂停状态同步复位） |
+| **导入历史** | 载入 CSV 历史数据并自动按实时节奏回放（文件放 `<应用目录>/imports`） |
+| **导出截图** | 把当前趋势画布保存为 PNG / JPG（写到 `<应用目录>/exports`） |
 | **导出数据** | 把环形缓冲中的历史数据导出为 CSV |
 | **通道参数配置** | 修改每路通道的显示开关、颜色、量程上下限、告警上下限，点「应用配置」生效 |
 | **患者类型** | 下拉切换成人 / 小儿 / 新生儿，自动加载对应报警限剖面（第二梯队第 6 项） |
-| **确认告警** | 报警条「确认」按钮：签收全部活动告警，声音停止；若条件仍成立会按 `repeatMs` 重新提示 |
-| **静音** | 报警条「静音」按钮：仅关闭声音，视觉提示保留（符合 IEC 60601-1-8 要求） |
+| **确认告警** | 报警条「确认」（或 `Ctrl+A`）：签收全部活动告警，声音停止；若条件仍成立会按 `repeatMs` 重新提示 |
+| **静音** | 报警条「🔊 静音」（或 `M`）：**只关声音**，横幅继续闪烁（IEC 60601-1-8 要求视觉提示保留） |
+| **暂停** | 报警条「⏸ 暂停」（或 `P`）：声音 + 闪烁**全部**停止，横幅变灰+斜纹并显示「恢复 N s」，**到期自动恢复** |
+| **空格** | 开始 / 停止采集 |
+
+### 报警声光提示（第二梯队第 6、7 项）
+
+| 能力 | 实现 | 说明 |
+|------|------|------|
+| 分级提示音 | `AlarmNotifier`（`QSoundEffect`） | 危急 / 升级：900 ms **3 连响**；一般：1800 ms 1 响；提示：3000 ms 1 响 |
+| 横幅闪烁 | `AlarmBanner.qml` + `Theme.blinkIntervalMs()` | 与声音节奏一一对应，暂停时强制停止 |
+| 状态栏常驻 | `Main.qml` | 「无报警」/「N 级报警 M 条」/「已静音」/「无音频」/「已暂停 N s」 |
+| 静音 Mute | `AlarmNotifier::setMuted()` | 只关声音，视觉提示保留 |
+| 暂停 Pause | `AlarmNotifier::startPause()` | 危急 ≤ **30 s**、其余 ≤ **120 s**（C++ 强制收紧）；倒计时每秒可见；到期自动恢复并立即重报 |
+| 无音频降级 | `AlarmNotifier::audioAvailable` | 横幅显示「⚠ 无音频输出，仅视觉报警」，不假装能响 |
+| 可追溯 | `AuditLogger` | 暂停 / 恢复 / 静音均落盘（含时长与活动告警数） |
+
+> **为什么提示音在 C++ 而不在 QML**：本工程是 `QGuiApplication`，不能调用
+> `QApplication::beep()`；更关键的是，若在 QML 里用 `Timer` 控制节奏，就会与
+> `AlarmDetector` 的 `alarmRepeatMs` / `alarmEscalateMs` 形成两套计时真源，
+> 最终表现为「横幅在闪、声音却没跟上」。
+>
+> **未做**：界面按钮点击无 GUI 自动化测试，暂停 / 静音的实际观感需目视回归
+> （清单见 `docs/变更控制流程.md` §6）。
 
 ### 报警状态机（第二梯队第 5 项）
 
@@ -332,21 +382,23 @@ sampleIndex,timestampMs,channelId,value
 
 ---
 
-## 十、代码要点索引（便于面试讲解）
+## 十、代码要点索引
 
 | 关注点 | 文件 | 关键设计 |
 |--------|------|---------|
 | 线程安全环形缓冲 | `src/core/RingBuffer.h` | 模板 + `QReadWriteLock`，`rangeByKey` 二分定位支持局部取数 |
 | 跨线程生产者 | `src/data/VitalSignSimulator.cpp` | `moveToThread` + `QTimer` 在子线程触发，只 `emit` 不碰 UI |
-| 线程装配 | `src/ui/MainWindow.cpp` → `setupThreading()` | `connect` 自动排队；`QThread::finished` → `deleteLater` 安全析构 |
-| 绘制优化 | `src/chart/TrendChartWidget.cpp` | `rebuildStaticBackground()` 缓存网格；`paintEvent` 按 `event->rect()` 裁剪绘制区 |
-| 局部重绘 | `src/chart/TrendChartWidget.cpp` → `appendFrames()` | 跟随模式下只 `update(绘图区)` |
+| 线程装配 | `src/app/MainWindowQml.cpp` → `setupThreading()` | `connect` 自动排队；`QThread::finished` → `deleteLater` 安全析构 |
+| 绘制优化 | `src/chart/ChartBridge.cpp` | `QQuickPaintedItem` 内 QPainter 绘制；高频数据 C++→C++ 直连，不经 QML 引擎 |
+| 局部重绘 | `src/chart/ChartBridge.cpp` → `appendFrames()` | 每 2 帧批量提交一次，降低重绘频率 |
+| 声光提示单一真源 | `src/core/AlarmNotifier.cpp` | 声音节奏 / 静音 / 暂停计时全在 C++，QML 只读状态（避免两套时钟） |
+| 无音频降级 | `src/core/AlarmNotifier.cpp` → `audioAvailable` | `QSoundEffect::status` 失败时显式提示「仅视觉报警」 |
 | 坐标映射 | `src/core/CoordinateMapper.cpp` | X 用采样序号视口，Y 按通道独立归一化并翻转 |
 | 报警状态机 | `src/core/AlarmDetector.cpp` | Active / Acknowledged / Escalated / Cleared 四态迁移；毫秒制延时；升级与重复提示使用**独立计时锚点** |
 | 报警时基一致性 | `src/core/AlarmDetector.cpp` → `acknowledge(key, nowMs)` | 确认操作必须传入与 `detect()` 相同的 `timestampMs` 时基，否则重报 / 升级计时错乱 |
 | 报警优先级 | `src/core/AlarmDetector.cpp` → `levelForPriority()` | 等级由 `AlarmPriority` + 二级阈值决定，不用「半量程」折算 |
-| 统一报警色码 | `src/data/SampleData.h` → `alarmIndicatorColor()` | 单一真源，曲线 / 报警条 / 数值面板共用（IEC 60601-1-8） |
-| 交互不扰动数据 | `src/chart/TrendChartWidget.cpp` → `wheelEvent/mouseMoveEvent` | 只改 `m_visibleSpan` / `m_dragStartIndex` |
+| 统一报警色码 | `src/data/SampleData.h` → `alarmIndicatorColor()` + `qml/Theme.qml` | 两处取值完全一致；曲线 / 横幅 / 数值卡片共用（IEC 60601-1-8） |
+| 交互不扰动数据 | `src/chart/ChartBridge.cpp` → 滚轮 / 拖拽处理 | 只改视口起点与跨度，不动环形缓冲 |
 
 ---
 
@@ -357,11 +409,19 @@ sampleIndex,timestampMs,channelId,value
    `mouseMoveEvent` 中获取悬停采样序号，据此绘制垂直游标并显示该时刻各通道数值。
 3. **降采样绘制**：当视口跨度远大于画布像素宽度时（例如 10 分钟窗口），
    可按像素列做 min/max 聚合降采样，进一步降低曲线路径构建开销。
-4. **报警条高级特性**：报警列表按优先级 / 时间排序并显示持续时长、暂停（Pause）功能。
-5. **用户身份与权限**：查看 / 配置 / 管理分级，关键操作（改报警限）需授权（IEC 81001-5-1）。
+4. **报警条高级特性**：报警列表已按优先级 / 持续时长排序并显示持续时长，
+   静音 / 暂停 / 确认与分级提示音已落地（v1.2.0）；
+   仍缺「报警历史归档」与「暂停超时未恢复的升级提醒」。
+5. **用户身份与权限**：查看 / 配置 / 管理分级，关键操作（改报警限）需授权
+   （IEC 81001-5-1）。**QML 版尚未移植**，见 `docs/危害分析与FMEA.md` H-10；
+   目前改报警限已有**二次确认**（v1.2.1），但无角色阻断。
+6. **文件完整性与开机自检**：导出文件的 SHA-256 伴生清单校验、
+   启动自检结论显示、采集线程看门狗 —— 均只在 Widgets 版实现，
+   QML 版未移植（FMEA H-11）。
 
-> 已完成项（声光报警、报警状态机、审计日志、SQI、技术报警、患者类型预设、
-> 每通道 Y 轴、IEC 色码、报警优先级语义、自动化测试）见
+> 已完成项（声光报警与分级提示音、静音 / 暂停、报警状态机、审计日志、SQI、
+> 技术报警、患者类型预设、每通道 Y 轴、IEC 色码、报警优先级语义、自动化测试、
+> 患者信息区与演示模式标识、配置二次确认、单位量纲校验、越界 / 伪迹角标）见
 > [二点五、医疗器材合规增强](#二点五医疗器材合规增强对应-docs医疗器材合规优化方向md)。
 
 > **从医疗器械角度的完整优化清单**（功能、规范性、安全性、合规性，含优先级路线图）

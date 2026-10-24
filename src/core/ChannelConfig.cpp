@@ -23,6 +23,137 @@ QString alarmPriorityName(AlarmPriority p)
     return QStringLiteral("中");
 }
 
+// ---------------------------------------------------------------------------
+// 单位 / 量纲校验（优化文档 9.1 第 3 项）
+// ---------------------------------------------------------------------------
+namespace {
+
+/// 单个单位的物理可能区间（用于检出「SpO2 量程 0~1000 %」这类配置错误）。
+struct UnitRange { const char *unit; double lo; double hi; };
+
+const UnitRange kUnitRanges[] = {
+    { "bpm",  0.0,    400.0 },   ///< 心率：成人 ~300 已是极限
+    { "rpm",  0.0,    120.0 },   ///< 呼吸率
+    { "%",    0.0,    100.0 },   ///< 血氧饱和度
+    { "℃",    -20.0,  50.0  },   ///< 摄氏度
+    { "°C",   -20.0,  50.0  },
+    { "C",    -20.0,  50.0  },
+    { "℉",    0.0,    130.0 },   ///< 华氏度
+    { "°F",   0.0,    130.0 },
+    { "F",    0.0,    130.0 },
+    { "mmHg", 0.0,    300.0 },   ///< 无创血压
+    { "mV",   -10.0,  10.0  },   ///< 心电幅度
+};
+
+/// 按通道名推断「应该」使用的量纲族（用于检出「体温配 bpm」这类错配）。
+/// 返回空串表示无法从名称推断。
+QString expectedDimensionOf(const QString &name)
+{
+    // @note 「呼吸率 RR」的名称里也含「率」字：若先判「心率 / 脉率」不会误伤
+    //       （没有共同子串），但若日后有人把判据放宽成「含『率』即为心率」，
+    //       呼吸通道就会先命中。这里把「呼吸」放在最前面，让意图显式化。
+    //       返回族群名必须与 dimensionOfUnit() 的族群名对得上：
+    //       bpm / rpm 都归 rate，心率与呼吸率允许互换单位。
+    if (name.contains(QStringLiteral("呼吸")))
+        return QStringLiteral("rate");
+    if (name.contains(QStringLiteral("心率")) || name.contains(QStringLiteral("HR"))
+        || name.contains(QStringLiteral("脉率")))
+        return QStringLiteral("rate");
+    if (name.contains(QStringLiteral("血氧")) || name.contains(QStringLiteral("SpO")))
+        return QStringLiteral("percent");
+    if (name.contains(QStringLiteral("体温")) || name.contains(QStringLiteral("Temp")))
+        return QStringLiteral("temperature");
+    if (name.contains(QStringLiteral("血压")) || name.contains(QStringLiteral("NIBP")))
+        return QStringLiteral("pressure");
+    return QString();
+}
+
+QString dimensionOfUnit(const QString &unit)
+{
+    if (unit == QStringLiteral("bpm") || unit == QStringLiteral("rpm"))
+        return QStringLiteral("rate");
+    if (unit == QStringLiteral("%"))
+        return QStringLiteral("percent");
+    if (unit == QStringLiteral("℃") || unit == QStringLiteral("°C")
+        || unit == QStringLiteral("C") || unit == QStringLiteral("℉")
+        || unit == QStringLiteral("°F") || unit == QStringLiteral("F"))
+        return QStringLiteral("temperature");
+    if (unit == QStringLiteral("mmHg"))
+        return QStringLiteral("pressure");
+    if (unit == QStringLiteral("mV"))
+        return QStringLiteral("voltage");
+    return QString();
+}
+
+/// 按 Unicode 码点精确比较单位符号。
+///
+/// @note 不能用 `QLatin1String`：非 ASCII 单位（`℃` / `℉`）会被截断成
+///       首字节，与 QString 比较永远不成立，所有体温通道都会被误判为
+///       「未登记单位」。也不能用 `Qt::CaseInsensitive`：Qt 的 Unicode
+///       小写折叠会把 `℃`(U+2103) 折叠成 `C`，导致 `℃` 与 `C` 混淆。
+bool unitEquals(const QString &lhs, const char *rhs)
+{
+    return lhs.compare(QString::fromUtf8(rhs), Qt::CaseSensitive) == 0;
+}
+
+} // namespace
+
+QString unitIssueName(UnitIssue i)
+{
+    switch (i) {
+    case UnitIssue::Ok:         return QStringLiteral("单位正常");
+    case UnitIssue::Unknown:    return QStringLiteral("单位未登记（无法校验）");
+    case UnitIssue::NotInRange: return QStringLiteral("量程在该单位下不可能");
+    case UnitIssue::Mismatch:   return QStringLiteral("单位与通道名称不符");
+    }
+    return QStringLiteral("未知");
+}
+
+bool isKnownUnit(const QString &unit)
+{
+    const QString u = unit.trimmed();
+    for (const UnitRange &r : kUnitRanges) {
+        if (unitEquals(u, r.unit))
+            return true;
+    }
+    return false;
+}
+
+bool isValuePlausibleInUnit(const QString &unit, double value)
+{
+    const QString u = unit.trimmed();
+    for (const UnitRange &r : kUnitRanges) {
+        if (unitEquals(u, r.unit))
+            return value >= r.lo && value <= r.hi;
+    }
+    // 未登记单位：不做判断（返回 true，避免误伤自定义单位）。
+    return true;
+}
+
+UnitIssue ChannelConfig::validateUnit() const
+{
+    const QString u = unit.trimmed();
+
+    // 1) 空单位 / 未登记单位：无法校验。
+    if (u.isEmpty() || !isKnownUnit(u))
+        return UnitIssue::Unknown;
+
+    // 2) 单位族与通道名暗示的量纲矛盾（典型：体温通道配 bpm）。
+    const QString expected = expectedDimensionOf(name);
+    if (!expected.isEmpty()) {
+        const QString actual = dimensionOfUnit(u);
+        // 心率与呼吸率同属「频率」族，可以互换；其余必须一致。
+        if (!actual.isEmpty() && actual != expected)
+            return UnitIssue::Mismatch;
+    }
+
+    // 3) 量程端点在物理上不可能（如 % 单位量程到 1000）。
+    if (!isValuePlausibleInUnit(u, minValue) || !isValuePlausibleInUnit(u, maxValue))
+        return UnitIssue::NotInRange;
+
+    return UnitIssue::Ok;
+}
+
 ChannelConfigManager::ChannelConfigManager()
 {
     loadDefaults();

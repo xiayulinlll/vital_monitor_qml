@@ -38,6 +38,32 @@ enum class AlarmPriority {
 QString alarmPriorityName(AlarmPriority p);
 
 /**
+ * @brief 单位校验结论（对应优化文档 9.1 第 3 项「单位与量纲校验」）。
+ *
+ * 临床风险：一个「体温」通道如果单位写成 `F` 而数值其实是 ℃，
+ * 36.8 会被读成 36.8 ℉（≈ 2.7 ℃，看上去像死亡），或反过来
+ * 98.6 ℃ 被当成正常。显示层必须能识别这类矛盾并提示。
+ *
+ * @note 与 Widgets 版 `src/core/ChannelConfig.h` 的枚举**逐项一致**，
+ *       便于两个工程的测试用例互相移植。
+ */
+enum class UnitIssue {
+    Ok = 0,        ///< 单位与生理量纲一致
+    Unknown,       ///< 未登记的单位（无法校验，仅提示）
+    NotInRange,    ///< 单位合法，但数值不可能出现在该单位下（如 SpO2 显示为 9600 %）
+    Mismatch       ///< 单位与通道名称暗示的量纲不一致（如 体温 用 bpm）
+};
+
+/// 单位校验结论的显示名（QML 的配置面板与二次确认清单直接展示）。
+QString unitIssueName(UnitIssue i);
+
+/// 该单位是否属于已知的生理量纲单位（用于区分「拼错」与「未登记」）。
+bool isKnownUnit(const QString &unit);
+
+/// 在给定单位下，该数值是否落在物理 / 生理上可能的范围内。
+bool isValuePlausibleInUnit(const QString &unit, double value);
+
+/**
  * @brief 单路生命体征通道的配置（名称 / 颜色 / 量程 / 告警阈值）。
  *
  * 对应架构 2.2 的「通道配置管理器」中的数据模型部分。
@@ -92,6 +118,20 @@ struct ChannelConfig
         if (v > maxValue) return maxValue;
         return v;
     }
+
+    /**
+     * @brief 校验「通道名 / 单位 / 量程」三者是否自洽（优化文档 9.1 第 3 项）。
+     *
+     * 判别顺序：
+     *  1. 单位为空或未登记 → Unknown；
+     *  2. 单位族与通道名暗示的量纲矛盾（体温配 bpm）→ Mismatch；
+     *  3. 量程在该单位下物理上不可能（如 % 单位量程到 1000）→ NotInRange；
+     *  4. 否则 Ok。
+     *
+     * @note 这是一个**事后校验**而不是强制约束：本项目允许用户自定义单位，
+     *       校验结论只用于在界面上打标记 + 写审计，避免「静默的错单位」。
+     */
+    UnitIssue validateUnit() const;
 };
 
 /**

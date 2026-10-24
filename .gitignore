@@ -28,3 +28,8 @@ qrc_*.cpp
 trend_*.png
 trend_*.jpg
 vital_*.csv
+
+# 运行时诊断日志（main.cpp 的 qInstallMessageHandler 落盘）
+vital_monitor_qml.log
+# 审计日志目录（AuditLogger 默认写到 <可执行文件目录>/audit）
+audit/

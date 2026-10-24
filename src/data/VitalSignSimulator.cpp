@@ -41,6 +41,9 @@ void VitalSignSimulator::start(int intervalMs)
     }
     m_intervalMs = qMax(1, intervalMs);
     m_lastTickMs = 0;
+    m_lastMonotonicMs = 0;
+    // 单调时钟从 0 起算，与告警计时的时基一致（墙钟只用于显示 / 存档）。
+    m_clock.start();
     m_timer->start(m_intervalMs);
     emit statusText(QStringLiteral("采集已启动，采样周期 %1 ms").arg(m_intervalMs));
 }
@@ -75,6 +78,8 @@ void VitalSignSimulator::reset()
 {
     m_sampleIndex = 0;
     m_lastTickMs  = 0;
+    m_lastMonotonicMs = 0;
+    m_clock.invalidate();
 }
 
 void VitalSignSimulator::onTick()
@@ -82,19 +87,25 @@ void VitalSignSimulator::onTick()
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
 
     SampleFrame frame;
+    /// 单调时钟值：不受系统校时影响，供告警计时使用。
+    const qint64 monoMs = m_clock.isValid() ? m_clock.elapsed() : 0;
+    frame.monotonicMs = monoMs;
 
     // ---- 数据完整性（第二梯队第 8 项）----
-    // 用单调递增的采样序号为主，实际时间差为辅：若实际间隔明显大于
-    // 采样周期，说明发生了抖动 / 丢帧，需要如实上报而非静默忽略。
-    if (m_lastTickMs > 0) {
-        frame.deltaMs = nowMs - m_lastTickMs;
+    // 用单调时钟的实际间隔判定丢帧（不能只比较墙钟时间戳：校时会误判），
+    // 若实际间隔明显大于采样周期，说明发生了抖动 / 丢帧，
+    // 需要如实上报而非静默忽略。
+    if (m_lastTickMs > 0 && m_lastMonotonicMs > 0) {
+        const qint64 monoDelta = monoMs - m_lastMonotonicMs;
+        frame.deltaMs = monoDelta;
         const qint64 expected = m_intervalMs;
-        if (frame.deltaMs > expected * 3 / 2) {
+        if (monoDelta > expected * 3 / 2) {
             frame.droppedFrames = static_cast<quint64>(
-                qMax<qint64>(1, (frame.deltaMs / qMax(1, expected)) - 1));
+                qMax<qint64>(1, (monoDelta / qMax(1, expected)) - 1));
         }
     }
     m_lastTickMs = nowMs;
+    m_lastMonotonicMs = monoMs;
 
     // ---- 模拟偶发丢帧事件，便于演示「数据不连续」技术报警 ----
     // @note 真实设备中该事件由驱动层上报；此处由模拟器主动制造。

@@ -23,6 +23,14 @@ struct ChannelSample
 
     /// 该样本是否为无效值（如导联脱落导致的测量失败）。
     bool   invalid   = false;
+
+    /// 生理合理性校验后判定为「伪迹」（运动伪迹 / 传感器瞬变）。
+    ///
+    /// @note 与 invalid 的区别：invalid 表示**测不到**，artifact 表示
+    ///       **测到了但物理上不可能**（如 HR 单帧从 60 跳到 200）。
+    ///       伪迹样本不参与告警判断，但原始值仍保留供医护人员查看，
+    ///       并且不会被 clamp 静默裁剪 —— 这是「不掩盖病情」的关键。
+    bool   artifact  = false;
 };
 
 /**
@@ -43,6 +51,16 @@ struct SampleFrame
     /// 相对上一帧丢失的采样帧数（0 表示无丢失）。
     /// 用于把「数据不连续」作为技术报警上报，而非静默忽略。
     quint64 droppedFrames = 0;
+
+    /// 单调时钟时间戳（毫秒，相对采集会话起点）。
+    ///
+    /// @note 与 timestampMs 的分工（优化文档 3.2 第 2 项「时间戳规范」）：
+    ///  - `timestampMs` 来自系统墙钟，可能因 NTP 校时**回拨或跳跃**，
+    ///    只用于显示与存档；
+    ///  - `monotonicMs` 来自 QElapsedTimer（不受系统时间调整影响），
+    ///    **告警延时 / 升级 / 重复提示的计时一律以它为准**。
+    /// 这样即使运行期间发生校时，报警去抖与升级时限也不会错乱。
+    qint64  monotonicMs = 0;
 };
 
 /**
@@ -83,8 +101,24 @@ struct AlarmEvent
     double  limit       = 0.0; ///< 被突破的阈值
     QString text;              ///< 告警描述文本
 
+    /**
+     * @brief 该事件对应的跟踪键（由 `AlarmDetector` 填入，通常非空）。
+     *
+     * 取值来自 `AlarmDetector::Track::key`，因此技术报警会是 `"1/2/SQI"`、
+     * 数据丢帧会是 `"1/-1/DROP"`，与 `conditionKey()` 生成的生理告警键
+     * （`"0/2/HI"`）属于不同的键空间。
+     *
+     * 需要回查「持续时长」「按条件定位」时**一律用本字段**，
+     * 不要用 `conditionKey()` 反推——后者对技术报警会构造出错误的键。
+     */
+    QString trackKey;
+
     /// 同一告警条件（同一通道 + 同一方向）的唯一标识，
     /// 用于把「持续越限」归并为一条活动告警而非反复新增。
+    ///
+    /// @warning 该函数**只描述生理告警**（类别/通道/方向三元组）。
+    ///          技术报警的键由 `AlarmDetector` 自行拼接（见 `trackKey`），
+    ///          两者不可互相替代。
     QString conditionKey() const
     {
         return QStringLiteral("%1/%2/%3")

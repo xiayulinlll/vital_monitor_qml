@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QVector>
 #include <QAtomicInt>
+#include <QElapsedTimer>
 
 #include "data/SampleData.h"
 #include "core/ChannelConfig.h"
@@ -69,6 +70,10 @@ private:
 
     /// 上一帧发出时刻（毫秒），用于数据完整性校验（第二梯队第 8 项）。
     qint64 m_lastTickMs = 0;
+    /// 上一帧发出的单调时钟值（毫秒），用于数据完整性校验。
+    qint64 m_lastMonotonicMs = 0;
+    /// 单调时钟：自 start() 起算，不受系统校时影响，供告警计时使用。
+    QElapsedTimer m_clock;
     /// 模拟丢帧：计数达到该值后跳过一帧并计入 droppedFrames。
     int m_simulatedDropCountdown = 0;
 };

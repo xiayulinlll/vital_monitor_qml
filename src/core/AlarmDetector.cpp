@@ -64,7 +64,18 @@ AlarmDetector::Track &AlarmDetector::trackFor(const QString &key)
     auto it = m_tracks.find(key);
     if (it == m_tracks.end())
         it = m_tracks.insert(key, Track());
+    // 键必须随 Track 一起保存：技术报警的键（"1/2/SQI"）无法由
+    // AlarmEvent::conditionKey() 反推出来，下游回查持续时长会失败。
+    if (it.value().key != key)
+        it.value().key = key;
     return it.value();
+}
+
+qint64 AlarmDetector::frameTimeMs(const SampleFrame &frame)
+{
+    // 单调时钟只用于计时（不受校时影响）；墙钟仅用于显示与存档。
+    // 无单调时钟的帧（回放 v1 历史文件）退回墙钟，保证仍能计时。
+    return frame.monotonicMs > 0 ? frame.monotonicMs : frame.timestampMs;
 }
 
 AlarmEvent AlarmDetector::makeEvent(const Track &t, const SampleFrame &frame,
@@ -80,6 +91,9 @@ AlarmEvent AlarmDetector::makeEvent(const Track &t, const SampleFrame &frame,
     e.highLimit   = t.highLimit;
     e.value       = t.lastValue;
     e.limit       = t.limit;
+    // 显式传递跟踪键：下游（报警列表 / 审计日志）靠它回查持续时长，
+    // 不能用 conditionKey() 反推（技术报警的键不在那个编码空间里）。
+    e.trackKey    = t.key;
 
     // 描述文本按类别 / 方向 / 严重度组装；技术报警单独措辞。
     if (t.category == AlarmEvent::Technical) {
@@ -253,7 +267,11 @@ QVector<AlarmEvent> AlarmDetector::detect(const SampleFrame &frame,
                                           const QVector<ChannelConfig> &configs)
 {
     QVector<AlarmEvent> events;
-    const qint64 nowMs = frame.timestampMs;
+    // 统一时基：优先使用单调时钟（见 SampleData::SampleFrame::monotonicMs）。
+    // 若用墙钟做计时，运行期间一次 NTP 校时就会让去抖/升级计时错乱。
+    const qint64 nowMs = frameTimeMs(frame);
+    if (nowMs > 0)
+        m_lastTickMs = nowMs;
 
     for (const ChannelSample &s : frame.channels) {
         // 找到通道在配置中的索引。
@@ -273,14 +291,31 @@ QVector<AlarmEvent> AlarmDetector::detect(const SampleFrame &frame,
         const qint64 repeatMs   = qMax<qint64>(0, cfg.alarmRepeatMs);
         const qint64 escalateMs = qMax<qint64>(0, cfg.alarmEscalateMs);
 
+        // 条件键格式必须与 AlarmEvent::conditionKey() 完全一致：
+        //   「类别/通道/方向」，例如 "0/2/HI"（生理 / 通道2 / 上限）。
+        //
+        // 早期此处误写成「通道/类别」（"%1/%2".arg(cfg.id).arg(0)），
+        // 导致同一条件在检测器内部与界面侧得到两套键：
+        // 日志里出现 "1/0/LO"（实际是通道1 的下限），按通道筛选、
+        // 跨模块比对全部错位。键是跨模块契约，顺序不得各写各的。
         const QString baseKey = QStringLiteral("%1/%2")
-                                    .arg(cfg.id).arg(0);   // 0 = 生理类
+                                    .arg(static_cast<int>(AlarmEvent::Physiological))
+                                    .arg(cfg.id);
 
         // ---- 信号质量门控（第二梯队第 7 项）----
         // 数值无效或 SQI 过低时，禁止基于该数据做生理判断，改发技术报警。
         const bool poorQuality = s.invalid || (s.quality < kLowQualityThreshold);
 
-        if (poorQuality) {
+        // ---- 生理合理性校验（优化文档 3.2 第 4 项：伪迹标记）----
+        // 上层的合理性校验已把「物理上不可能」的跳变标记为 artifact；
+        // 这类样本同样不得参与生理报警判断，否则一次运动伪迹就会触发
+        // 一条看起来「危及生命」的误报，反而稀释真实报警的可信度。
+        //
+        // 注意：这里**不裁剪数值**，原始值照常显示与存档，
+        // 保证「异常值不被 clamp 静默掩盖」。
+        const bool artifact = s.artifact && !s.invalid;
+
+        if (poorQuality || artifact) {
             // 主动解除仍在活跃的生理告警，避免用不可信数据持续报假警。
             updateCondition(baseKey + QStringLiteral("/HI"), false, true, cfg.id,
                             s.value, cfg.alarmHigh, AlarmEvent::Physiological,
@@ -290,6 +325,11 @@ QVector<AlarmEvent> AlarmDetector::detect(const SampleFrame &frame,
                             s.value, cfg.alarmLow, AlarmEvent::Physiological,
                             QString(), AlarmEvent::Warning, nowMs, delayMs,
                             repeatMs, escalateMs, frame, events);
+
+            // 伪迹不等于「测不到」：信号本身是好的，只是数值不可信，
+            // 因此不产生技术报警（避免把运动伪迹报成「导联脱落」）。
+            if (artifact)
+                continue;
 
             // 技术报警：信号质量不足 / 数值无效（第二梯队第 9 项）。
             const QString techKey = QStringLiteral("%1/%2/SQI")
@@ -416,6 +456,10 @@ QVector<AlarmEvent> AlarmDetector::acknowledge(const QString &conditionKey,
     const SampleFrame dummy;   // 确认事件不带新数据，仅承载状态
     // 关键：确认时刻必须与 detect() 使用同一时基，否则 lastReportMs 会
     // 与后续帧的 timestampMs 相差一个量级，导致重复提示 / 升级永不触发。
+    // 传 0 时回退到「最近一次 detect() 的时基」，而不是墙钟时间——
+    // 墙钟与单调时钟混用正是最初那处时基 Bug 的根源。
+    if (nowMs <= 0)
+        nowMs = m_lastTickMs;
     if (nowMs <= 0)
         nowMs = QDateTime::currentMSecsSinceEpoch();
 
@@ -424,6 +468,15 @@ QVector<AlarmEvent> AlarmDetector::acknowledge(const QString &conditionKey,
         if (!t.active)
             continue;
         if (!conditionKey.isEmpty() && it.key() != conditionKey)
+            continue;
+
+        // 幂等：已经确认过的告警不再重复返回。
+        // 「确认」是一次事件，不是可反复触发的动作——医护在报警高峰期
+        // 连点按钮是常态，若每次点击都写一条审计，审计日志会被同一批
+        // 告警淹没（实测连点 7 次 = 21 条重复记录），真正的事件反而被埋掉。
+        // 条件仍成立时，重复提示由 updateCondition() 的 repeatMs 负责，
+        // 不依赖 acknowledge() 的重复调用。
+        if (t.acknowledged)
             continue;
 
         t.acknowledged = true;
@@ -484,10 +537,31 @@ QVector<AlarmEvent> AlarmDetector::activeAlarms() const
     return list;
 }
 
+QHash<QString, qint64> AlarmDetector::activeDurationsMs(qint64 nowMs) const
+{
+    if (nowMs <= 0)
+        nowMs = m_lastTickMs;
+
+    QHash<QString, qint64> durations;
+    for (auto it = m_tracks.constBegin(); it != m_tracks.constEnd(); ++it) {
+        const Track &t = it.value();
+        if (!t.active)
+            continue;
+        // 兜底：onsetMs 理论上在激活时必定 > 0，但若为 0（历史数据 / 状态迁移
+        // 遗漏），仍然返回 0 而不是把整条记录漏掉。漏掉会让上层
+        // durations.value() 落空，报警列表显示「—」、审计日志出现「?s」，
+        // 恰恰在最需要「已持续多久」的时候丢失信息。
+        const qint64 onset = (t.onsetMs > 0) ? t.onsetMs : nowMs;
+        durations.insert(it.key(), qMax<qint64>(0, nowMs - onset));
+    }
+    return durations;
+}
+
 void AlarmDetector::reset()
 {
     m_tracks.clear();
     m_lastTechReportMs.clear();
     m_accumulatedDrops = 0;
+    m_lastTickMs = 0;
 }
 

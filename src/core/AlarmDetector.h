@@ -55,12 +55,17 @@ public:
                                const QVector<ChannelConfig> &configs);
 
     /// 确认（签收）某条活动告警；返回被确认的事件（供审计）。
-    /// @param conditionKey 由 AlarmEvent::conditionKey() 生成；
+    /// @param conditionKey 由 `AlarmEvent::trackKey` 给出（**不是**
+    ///                     `conditionKey()`：技术报警不在那个编码空间里）；
     ///                     传空字符串表示确认全部活动告警。
     /// @param nowMs        当前时间基准（毫秒），必须与 detect() 传入的
     ///                     SampleFrame::timestampMs 使用同一时基，
     ///                     否则后续「重复提示 / 升级」的计时会因时基错乱而失效。
-    ///                     传 0 表示使用系统当前时间（仅在无采集数据时使用）。
+    ///                     传 0 表示使用 detect() 最近记录的时基。
+    ///
+    /// @note **幂等**：已确认过的告警不会被再次返回，因此界面连点
+    ///       「确认」不会在审计日志里堆出重复记录。条件仍成立时的重复提示
+    ///       由 `updateCondition()` 按 `alarmRepeatMs` 负责，不依赖重复确认。
     QVector<AlarmEvent> acknowledge(const QString &conditionKey = QString(),
                                     qint64 nowMs = 0);
 
@@ -77,10 +82,32 @@ public:
     /// 遍历当前活动告警（含状态），用于界面刷新。
     QVector<AlarmEvent> activeAlarms() const;
 
+    /**
+     * @brief 各活动告警的持续时长（毫秒，相对 `nowMs`）。
+     *
+     * 用于报警列表按「已持续 N 秒」排序显示（优化文档 9.2 第 1 项：
+     * 报警列表须显示持续时间）。
+     *
+     * @param nowMs 与 detect() 相同的时基；传 0 时取内部记录的最新时基。
+     * @return key = 跟踪键（与 `AlarmEvent::trackKey` 同一空间），
+     *         value = 持续毫秒数。
+     */
+    QHash<QString, qint64> activeDurationsMs(qint64 nowMs = 0) const;
+
     /// 清空内部状态（停止采集 / 清空时调用）。
     void reset();
 
 private:
+    /**
+     * @brief 取本帧的告警计时时基（毫秒）。
+     *
+     * 优先使用单调时钟 `SampleFrame::monotonicMs`；缺失（如回放旧格式数据）
+     * 时退回墙钟 `timestampMs`。二者**绝不可在同一会话内混用**：
+     * 墙钟是 1970 起算的大数，单调时钟从 0 起算，混用会让
+     * 「已持续时长」出现数十年量级的荒谬值，也会让重复提示失效。
+     */
+    static qint64 frameTimeMs(const SampleFrame &frame);
+
     /// 单条告警条件的跟踪状态。
     struct Track {
         bool    active      = false;  ///< 条件当前是否成立（已越过延时）
@@ -102,6 +129,17 @@ private:
         int     channelId   = -1;
         bool    highLimit   = true;
         QString text;                 ///< 首次上报时的描述文本
+
+        /// 该跟踪记录在 `m_tracks` 中的真实键。
+        ///
+        /// @note 必须显式保存，不能由 `AlarmEvent::conditionKey()` 反推。
+        ///       技术报警的键形如 `"1/2/SQI"`、丢帧键为 `"1/-1/DROP"`，
+        ///       它们与「类别/通道/方向」三元组**不是同一套编码**；
+        ///       而 `AlarmEvent::conditionKey()` 只能生成 `"1/2/HI"` 这类
+        ///       生理告警键。早期版本正是靠 `conditionKey()` 反查
+        ///       `activeDurationsMs()`，导致技术报警的持续时长永远查不到、
+        ///       审计日志里出现「持续时间=?s」。
+        QString key;
     };
 
     /// 取（或创建）指定条件的跟踪记录。
@@ -130,6 +168,12 @@ private:
                          QVector<AlarmEvent> &out);
 
     int m_defaultSampleIntervalMs = 100;
+
+    /// 最近一次 detect() 使用的时基（毫秒）。
+    ///
+    /// 供 `activeDurationsMs(0)` / `acknowledge("")` 在无参数时兜底，
+    /// 保证「持续时长」永远与同一时基比较，不会出现负数。
+    qint64 m_lastTickMs = 0;
 
     /// 累计丢帧计数（相对增量需自行累加，见 detect()）。
     quint64 m_accumulatedDrops = 0;
